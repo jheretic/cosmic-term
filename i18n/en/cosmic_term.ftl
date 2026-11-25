@@ -60,6 +60,23 @@ splits = Splits
 focus-follow-mouse = Typing focus follows mouse
 show-pane-borders = Show pane borders
 
+### Dropdown
+dropdown = Dropdown
+dropdown-output = Monitor
+dropdown-output-focused = Focused monitor
+dropdown-output-disconnected = {$name} (disconnected)
+dropdown-anchor = Screen edge
+dropdown-anchor-top = Top
+dropdown-anchor-bottom = Bottom
+dropdown-anchor-left = Left
+dropdown-anchor-right = Right
+dropdown-width = Width
+dropdown-height = Height
+dropdown-above-fullscreen = Show above fullscreen windows
+dropdown-exclusive-focus = Keep keyboard focus while shown
+dropdown-exclusive-focus-description = Other windows cannot receive typing until the dropdown is hidden
+dropdown-hide-on-focus-loss = Hide when another window is focused
+
 ### Advanced
 advanced = Advanced
 show-headerbar = Show header

@@ -47,8 +47,8 @@ use std::{
 use tokio::sync::mpsc;
 
 use config::{
-    AppTheme, CONFIG_VERSION, ColorScheme, ColorSchemeId, ColorSchemeKind, Config, Profile,
-    ProfileId,
+    AppTheme, CONFIG_VERSION, ColorScheme, ColorSchemeId, ColorSchemeKind, Config, DropdownAnchor,
+    DropdownFocus, DropdownLayer, DropdownSetting, Profile, ProfileId,
 };
 mod config;
 mod mouse_reporter;
@@ -81,6 +81,9 @@ mod terminal_theme;
 
 mod dnd;
 
+#[cfg(feature = "wayland")]
+mod dropdown;
+
 use clap_lex::RawArgs;
 
 static ICON_CACHE: LazyLock<Mutex<IconCache>> = LazyLock::new(|| Mutex::new(IconCache::new()));
@@ -100,6 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut shell_args = Vec::new();
     let mut daemonize = std::io::stdin().is_terminal();
     let mut working_directory = None;
+    let mut dropdown = false;
     // Parse the arguments using clap_lex
     while let Some(arg) = raw_args.next_os(&mut cursor) {
         match arg.to_str() {
@@ -124,6 +128,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             Some("--no-daemon") => {
                 daemonize = false;
+            }
+            Some("--dropdown") => {
+                dropdown = true;
             }
             Some("-e") | Some("--command") | Some("--") => {
                 // Handle the '--command' or '-e' flag
@@ -155,6 +162,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("failed to daemonize: {:?}", err);
                 process::exit(1);
             }
+        }
+    }
+
+    if dropdown {
+        #[cfg(feature = "wayland")]
+        if dropdown::toggle_existing() {
+            return Ok(());
+        }
+        #[cfg(not(feature = "wayland"))]
+        {
+            eprintln!("--dropdown requires the wayland feature");
+            process::exit(1);
         }
     }
 
@@ -202,6 +221,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut settings = Settings::default();
     settings = settings.theme(config.app_theme.theme());
     settings = settings.size_limits(Limits::NONE.min_width(360.0).min_height(180.0));
+    if dropdown {
+        settings = settings.no_main_window(true).exit_on_close(false);
+    }
 
     // Flags
     let flags = Flags {
@@ -210,12 +232,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         shortcuts_config,
         startup_options,
         term_config,
+        dropdown,
     };
 
     // Run the cosmic app
     cosmic::app::run::<App>(settings, flags)?;
 
     Ok(())
+}
+
+#[cfg(feature = "wayland")]
+fn dropdown_layer_surface(
+    settings: iced::platform_specific::runtime::wayland::layer_surface::SctkLayerSurfaceSettings,
+    live: surface::action::LiveSettings,
+) -> Task<Message> {
+    let surface =
+        surface::action::app_layer_shell::<App>(move |_| live, move |_| settings.clone(), None);
+    cosmic::task::message(cosmic::Action::Surface(surface))
 }
 
 fn print_help() {
@@ -227,6 +260,7 @@ Project home page: https://github.com/pop-os/cosmic-term
 Options:
   --help                          Show this message
   --version                       Show the version of cosmic-term
+  --dropdown                      Toggle the quake-style dropdown terminal
   -w, --working-directory <dir>   Set the working directory for the terminal"#
     );
 }
@@ -238,6 +272,7 @@ pub struct Flags {
     shortcuts_config: shortcuts::ShortcutsConfig,
     startup_options: Option<tty::Options>,
     term_config: term::Config,
+    dropdown: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -430,6 +465,22 @@ pub enum Message {
     ProfileSyntaxTheme(ProfileId, ColorSchemeKind, usize),
     ProfileTabTitle(ProfileId, String),
     ReorderTab(Pane, ReorderEvent),
+    Dropdown(DropdownSetting),
+    #[cfg(feature = "wayland")]
+    DropdownDbus(dropdown::Signal),
+    #[cfg(feature = "wayland")]
+    DropdownFocusLost(window::Id),
+    #[cfg(feature = "wayland")]
+    DropdownFocusGained,
+    #[cfg(feature = "wayland")]
+    DropdownFocusTimeout(u64),
+    #[cfg(feature = "wayland")]
+    DropdownOutput(
+        iced::event::wayland::OutputEvent,
+        cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput,
+    ),
+    #[cfg(feature = "wayland")]
+    DropdownSurfaceOpened(window::Id, iced::Size),
     Surface(surface::Action<Message>),
     SelectAll(Option<segmented_button::Entity>),
     ShowAdvancedFontSettings(bool),
@@ -492,6 +543,7 @@ pub struct App {
     shortcuts_config: shortcuts::ShortcutsConfig,
     key_binds: HashMap<KeyBind, Action>,
     app_themes: Vec<String>,
+    dropdown_anchor_names: Vec<String>,
     font_names: Vec<String>,
     font_size_names: Vec<String>,
     font_sizes: Vec<u16>,
@@ -534,9 +586,107 @@ pub struct App {
     modifiers: Modifiers,
     #[cfg(feature = "password_manager")]
     password_mgr: password_manager::PasswordManager,
+    dropdown: bool,
+    #[cfg(feature = "wayland")]
+    dropdown_state: dropdown::Dropdown,
 }
 
 impl App {
+    #[cfg(feature = "wayland")]
+    fn dropdown_toggle(&mut self) -> Task<Message> {
+        if self.dropdown_state.is_visible() {
+            self.dropdown_hide()
+        } else {
+            self.dropdown_show()
+        }
+    }
+
+    #[cfg(feature = "wayland")]
+    fn dropdown_show(&mut self) -> Task<Message> {
+        let Some(probe) = self.dropdown_state.begin_show(&self.config.dropdown) else {
+            return Task::none();
+        };
+        let no_blur = surface::action::LiveSettings {
+            blur: Some(false),
+            ..Default::default()
+        };
+        let mut tasks = vec![dropdown_layer_surface(probe, no_blur)];
+
+        let has_tabs = self
+            .pane_model
+            .active()
+            .is_some_and(|tab_model| tab_model.iter().next().is_some());
+        if !has_tabs && self.term_event_tx_opt.is_some() {
+            tasks.push(self.update(Message::TabNew));
+        }
+        Task::batch(tasks)
+    }
+
+    #[cfg(feature = "wayland")]
+    fn dropdown_surface_opened(&mut self, id: window::Id, size: iced::Size) -> Task<Message> {
+        let Some(settings) = self
+            .dropdown_state
+            .finish_show(id, size, &self.config.dropdown)
+        else {
+            return Task::none();
+        };
+        self.core.set_main_window_id(Some(settings.id));
+        Task::batch([
+            cosmic::task::message(cosmic::Action::Surface(
+                surface::action::destroy_layer_shell(id),
+            )),
+            dropdown_layer_surface(settings, surface::action::LiveSettings::default()),
+            self.update_title(None),
+        ])
+    }
+
+    #[cfg(feature = "wayland")]
+    fn dropdown_hide(&mut self) -> Task<Message> {
+        let Some(id) = self.dropdown_state.hide() else {
+            return Task::none();
+        };
+        self.core.set_main_window_id(None);
+        cosmic::task::message(cosmic::Action::Surface(
+            surface::action::destroy_layer_shell(id),
+        ))
+    }
+
+    #[cfg(not(feature = "wayland"))]
+    fn dropdown_hide(&mut self) -> Task<Message> {
+        Task::none()
+    }
+
+    #[cfg(feature = "wayland")]
+    fn dropdown_output(
+        &mut self,
+        event: iced::event::wayland::OutputEvent,
+        output: cosmic::cctk::sctk::reexports::client::protocol::wl_output::WlOutput,
+    ) -> Task<Message> {
+        let change = self
+            .dropdown_state
+            .output_event(event, output, &self.config.dropdown);
+        match change {
+            dropdown::OutputChange::ShowPending if self.dropdown => self.dropdown_show(),
+            dropdown::OutputChange::SurfaceLost => {
+                self.core.set_main_window_id(None);
+                Task::none()
+            }
+            dropdown::OutputChange::ShowPending | dropdown::OutputChange::None => Task::none(),
+        }
+    }
+
+    #[cfg(feature = "wayland")]
+    fn dropdown_config_changed(&mut self) -> Task<Message> {
+        match self.dropdown_state.config_changed(&self.config.dropdown) {
+            dropdown::ConfigChange::None => Task::none(),
+            dropdown::ConfigChange::Apply(task) => task,
+            dropdown::ConfigChange::Recreate => {
+                let hide = self.dropdown_hide();
+                hide.chain(self.dropdown_show())
+            }
+        }
+    }
+
     fn theme_names(&self, color_scheme_kind: ColorSchemeKind) -> &Vec<String> {
         match color_scheme_kind {
             ColorSchemeKind::Dark => &self.theme_names_dark,
@@ -701,7 +851,10 @@ impl App {
         self.core.window.show_headerbar = self.config.show_headerbar;
 
         // Update application theme
-        cosmic::command::set_theme(theme)
+        let task = cosmic::command::set_theme(theme);
+        #[cfg(feature = "wayland")]
+        let task = Task::batch([task, self.dropdown_config_changed()]);
+        task
     }
 
     fn update_render_active_pane_zoom(&mut self, zoom_message: Message) -> Task<Message> {
@@ -1324,6 +1477,90 @@ impl App {
         widget::settings::view_column(sections).into()
     }
 
+    #[cfg(feature = "wayland")]
+    fn dropdown_settings_section(&self) -> widget::settings::Section<'_, Message> {
+        const PERCENT_STEP: u8 = 5;
+        const PERCENT_MIN: u8 = 10;
+        const PERCENT_MAX: u8 = 100;
+
+        let dropdown = &self.config.dropdown;
+        let anchor_selected = DropdownAnchor::ALL
+            .iter()
+            .position(|anchor| *anchor == dropdown.anchor);
+        let output_choices = self.dropdown_state.output_choices().to_vec();
+        let output_selected = output_choices
+            .iter()
+            .position(|choice| *choice == dropdown.output);
+        let percent = |label: String, value: u8, setting: fn(u8) -> DropdownSetting| {
+            widget::settings::item::builder(label).control(widget::spin_button(
+                format!("{value}%"),
+                value,
+                PERCENT_STEP,
+                PERCENT_MIN,
+                PERCENT_MAX,
+                move |value| Message::Dropdown(setting(value)),
+            ))
+        };
+
+        widget::settings::section()
+            .title(fl!("dropdown"))
+            .add(
+                widget::settings::item::builder(fl!("dropdown-output")).control(widget::dropdown(
+                    self.dropdown_state.output_names(),
+                    output_selected,
+                    move |index| {
+                        Message::Dropdown(DropdownSetting::Output(output_choices[index].clone()))
+                    },
+                )),
+            )
+            .add(
+                widget::settings::item::builder(fl!("dropdown-anchor")).control(widget::dropdown(
+                    &self.dropdown_anchor_names,
+                    anchor_selected,
+                    |index| Message::Dropdown(DropdownSetting::Anchor(DropdownAnchor::ALL[index])),
+                )),
+            )
+            .add(percent(
+                fl!("dropdown-width"),
+                dropdown.width_percent,
+                DropdownSetting::WidthPercent,
+            ))
+            .add(percent(
+                fl!("dropdown-height"),
+                dropdown.height_percent,
+                DropdownSetting::HeightPercent,
+            ))
+            .add(
+                widget::settings::item::builder(fl!("dropdown-above-fullscreen")).toggler(
+                    dropdown.layer == DropdownLayer::Overlay,
+                    |overlay| {
+                        Message::Dropdown(DropdownSetting::Layer(if overlay {
+                            DropdownLayer::Overlay
+                        } else {
+                            DropdownLayer::Top
+                        }))
+                    },
+                ),
+            )
+            .add(
+                widget::settings::item::builder(fl!("dropdown-exclusive-focus"))
+                    .description(fl!("dropdown-exclusive-focus-description"))
+                    .toggler(dropdown.focus == DropdownFocus::Exclusive, |exclusive| {
+                        Message::Dropdown(DropdownSetting::Focus(if exclusive {
+                            DropdownFocus::Exclusive
+                        } else {
+                            DropdownFocus::OnDemand
+                        }))
+                    }),
+            )
+            .add_maybe((dropdown.focus == DropdownFocus::OnDemand).then(|| {
+                widget::settings::item::builder(fl!("dropdown-hide-on-focus-loss"))
+                    .toggler(dropdown.hide_on_focus_loss, |hide| {
+                        Message::Dropdown(DropdownSetting::HideOnFocusLoss(hide))
+                    })
+            }))
+    }
+
     fn settings(&self) -> Element<'_, Message> {
         let t = self.core().system_theme();
         let app_theme_selected = match self.config.app_theme {
@@ -1532,6 +1769,8 @@ impl App {
             appearance_section.into(),
             font_section.into(),
             splits_section.into(),
+            #[cfg(feature = "wayland")]
+            self.dropdown_settings_section().into(),
             advanced_section.into(),
         ])
         .into()
@@ -1724,6 +1963,11 @@ impl Application for App {
     fn init(mut core: Core, flags: Self::Flags) -> (Self, Task<Self::Message>) {
         core.window.content_container = false;
         core.window.show_headerbar = flags.config.show_headerbar;
+        if flags.dropdown {
+            core.window.show_close = false;
+            core.window.show_maximize = false;
+            core.window.show_minimize = false;
+        }
 
         // Update font name from config
         {
@@ -1735,6 +1979,15 @@ impl Application for App {
         }
 
         let app_themes = vec![fl!("match-desktop"), fl!("dark"), fl!("light")];
+        let dropdown_anchor_names = DropdownAnchor::ALL
+            .iter()
+            .map(|anchor| match anchor {
+                DropdownAnchor::Top => fl!("dropdown-anchor-top"),
+                DropdownAnchor::Bottom => fl!("dropdown-anchor-bottom"),
+                DropdownAnchor::Left => fl!("dropdown-anchor-left"),
+                DropdownAnchor::Right => fl!("dropdown-anchor-right"),
+            })
+            .collect();
 
         let font_name_faces_map = {
             let mut font_name_faces_map = BTreeMap::<_, Vec<_>>::new();
@@ -1850,6 +2103,7 @@ impl Application for App {
             shortcuts_config: flags.shortcuts_config,
             key_binds,
             app_themes,
+            dropdown_anchor_names,
             font_names,
             font_size_names,
             font_sizes,
@@ -1891,6 +2145,9 @@ impl Application for App {
             modifiers: Modifiers::empty(),
             #[cfg(feature = "password_manager")]
             password_mgr: Default::default(),
+            dropdown: flags.dropdown,
+            #[cfg(feature = "wayland")]
+            dropdown_state: dropdown::Dropdown::default(),
         };
 
         app.set_curr_font_weights_and_stretches();
@@ -2229,6 +2486,9 @@ impl Application for App {
                 return self.update_focus();
             }
             Message::ToggleFullscreen => {
+                if self.dropdown {
+                    return Task::none();
+                }
                 if let Some(window_id) = self.core.main_window_id() {
                     return cosmic::command::toggle_maximize(window_id);
                 }
@@ -2865,6 +3125,9 @@ impl Application for App {
                             self.pane_model.set_focus(sibling);
                         } else {
                             //Last pane, closing window
+                            if self.dropdown {
+                                return self.dropdown_hide();
+                            }
                             if let Some(window_id) = self.core.main_window_id() {
                                 return window::close(window_id);
                             }
@@ -3189,6 +3452,9 @@ impl Application for App {
                 config_set!(default_profile, default.then_some(profile_id));
             }
             Message::WindowClose => {
+                if self.dropdown {
+                    return iced::exit();
+                }
                 if let Some(window_id) = self.core.main_window_id() {
                     return window::close(window_id);
                 }
@@ -3234,6 +3500,49 @@ impl Application for App {
             }
             Message::Surface(a) => {
                 return cosmic::task::message(cosmic::Action::Surface(a));
+            }
+            Message::Dropdown(setting) => {
+                let mut dropdown = self.config.dropdown.clone();
+                dropdown.set(setting);
+                config_set!(dropdown, dropdown);
+                return self.update_config();
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownDbus(dropdown::Signal::Toggle) => {
+                return self.dropdown_toggle();
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownDbus(dropdown::Signal::Replaced) => {
+                log::info!("replaced by a newer dropdown instance, exiting");
+                return iced::exit();
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownFocusLost(id) => {
+                if let Some(generation) = self.dropdown_state.focus_lost(id, &self.config.dropdown)
+                {
+                    return cosmic::task::future(async move {
+                        tokio::time::sleep(dropdown::FOCUS_LOSS_GRACE).await;
+                        Message::DropdownFocusTimeout(generation)
+                    });
+                }
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownFocusGained => {
+                self.dropdown_state.focus_gained();
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownFocusTimeout(generation) => {
+                if self.dropdown_state.focus_timed_out(generation) {
+                    return self.dropdown_hide();
+                }
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownOutput(event, output) => {
+                return self.dropdown_output(event, output);
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownSurfaceOpened(id, size) => {
+                return self.dropdown_surface_opened(id, size);
             }
             Message::ReorderTab(
                 pane,
@@ -3337,6 +3646,10 @@ impl Application for App {
     }
 
     fn view_window(&self, window_id: window::Id) -> Element<'_, Message> {
+        #[cfg(feature = "wayland")]
+        if self.dropdown_state.is_measuring(window_id) {
+            return widget::space::horizontal().into();
+        }
         match &self.dialog_opt {
             Some(dialog) => dialog.view(window_id),
             None => widget::text("Unknown window ID").into(),
@@ -3608,6 +3921,30 @@ impl Application for App {
                 Some(dialog) => dialog.subscription(),
                 None => Subscription::none(),
             },
+            #[cfg(feature = "wayland")]
+            if self.dropdown {
+                dropdown::subscription().map(Message::DropdownDbus)
+            } else {
+                Subscription::none()
+            },
+            #[cfg(feature = "wayland")]
+            event::listen_with(|event, _status, window_id| match event {
+                Event::Window(window::Event::Opened { size, .. }) => {
+                    Some(Message::DropdownSurfaceOpened(window_id, size))
+                }
+                Event::PlatformSpecific(event::PlatformSpecific::Wayland(
+                    event::wayland::Event::Output(output_event, output),
+                )) => Some(Message::DropdownOutput(output_event, output)),
+                Event::PlatformSpecific(event::PlatformSpecific::Wayland(
+                    event::wayland::Event::Layer(event::wayland::LayerEvent::Unfocused, _, id),
+                )) => Some(Message::DropdownFocusLost(id)),
+                Event::PlatformSpecific(event::PlatformSpecific::Wayland(
+                    event::wayland::Event::Layer(event::wayland::LayerEvent::Focused, ..)
+                    | event::wayland::Event::Popup(event::wayland::PopupEvent::Focused, ..),
+                ))
+                | Event::Window(window::Event::Focused) => Some(Message::DropdownFocusGained),
+                _ => None,
+            }),
         ])
     }
 }
