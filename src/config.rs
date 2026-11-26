@@ -216,6 +216,84 @@ impl Default for Profile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DropdownAnchor {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl DropdownAnchor {
+    pub const ALL: [Self; 4] = [Self::Top, Self::Bottom, Self::Left, Self::Right];
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DropdownLayer {
+    #[default]
+    Top,
+    Overlay,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DropdownFocus {
+    #[default]
+    Exclusive,
+    OnDemand,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct DropdownConfig {
+    pub anchor: DropdownAnchor,
+    pub width_percent: u8,
+    pub height_percent: u8,
+    pub output: Option<String>,
+    pub layer: DropdownLayer,
+    pub focus: DropdownFocus,
+    pub hide_on_focus_loss: bool,
+}
+
+impl Default for DropdownConfig {
+    fn default() -> Self {
+        Self {
+            anchor: DropdownAnchor::Top,
+            width_percent: 100,
+            height_percent: 40,
+            output: None,
+            layer: DropdownLayer::Top,
+            focus: DropdownFocus::Exclusive,
+            hide_on_focus_loss: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum DropdownSetting {
+    Anchor(DropdownAnchor),
+    WidthPercent(u8),
+    HeightPercent(u8),
+    Output(Option<String>),
+    Layer(DropdownLayer),
+    Focus(DropdownFocus),
+    HideOnFocusLoss(bool),
+}
+
+impl DropdownConfig {
+    pub fn set(&mut self, setting: DropdownSetting) {
+        match setting {
+            DropdownSetting::Anchor(anchor) => self.anchor = anchor,
+            DropdownSetting::WidthPercent(percent) => self.width_percent = percent,
+            DropdownSetting::HeightPercent(percent) => self.height_percent = percent,
+            DropdownSetting::Output(output) => self.output = output,
+            DropdownSetting::Layer(layer) => self.layer = layer,
+            DropdownSetting::Focus(focus) => self.focus = focus,
+            DropdownSetting::HideOnFocusLoss(hide) => self.hide_on_focus_loss = hide,
+        }
+    }
+}
+
 #[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Config {
     pub app_theme: AppTheme,
@@ -241,6 +319,8 @@ pub struct Config {
     pub default_profile: Option<ProfileId>,
     #[serde(default)]
     pub shortcuts_custom: Shortcuts,
+    #[serde(default)]
+    pub dropdown: DropdownConfig,
 }
 
 impl Default for Config {
@@ -267,6 +347,7 @@ impl Default for Config {
             use_bright_bold: false,
             default_profile: None,
             shortcuts_custom: Shortcuts::default(),
+            dropdown: DropdownConfig::default(),
         }
     }
 }

@@ -17,7 +17,7 @@ regex = "1"
 ron = "0.12"
 serde = { version = "1", features = ["serde_derive"] }
 shlex = "2"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 # CLI arguments
 clap_lex = "1.1"
 # Internationalization
@@ -35,6 +35,7 @@ secret-service = { version = "6.0.0", features = [
 ], optional = true }
 thiserror = { version = "2.0", optional = true }
 secstr = { version = "0.5", optional = true }
+zbus = { version = "6", default-features = false, features = ["tokio", "service", "proxy"], optional = true }
 
 [dependencies.cosmic-files]
 git = "https://github.com/pop-os/cosmic-files.git"
@@ -67,7 +68,7 @@ xdgen = "0.1"
 default = ["dbus-config", "wgpu", "wayland", "password_manager"]
 dbus-config = ["libcosmic/dbus-config"]
 wgpu = ["libcosmic/wgpu", "cosmic-files/wgpu"]
-wayland = ["libcosmic/wayland", "cosmic-files/wayland"]
+wayland = ["libcosmic/wayland", "cosmic-files/wayland", "dep:zbus"]
 password_manager = ["secret-service", "thiserror", "secstr"]
 
 [profile.release-with-debug]
