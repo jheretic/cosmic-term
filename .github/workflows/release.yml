@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "epoch-*-plus.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build portable binary
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git pkg-config \
+            libxkbcommon-dev libwayland-dev
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          upstream="${tag#epoch-}"
+          upstream="${upstream%-plus.*}"
+          revision="${tag##*-plus.}"
+          pkgid="$(cargo pkgid)"
+          cargo_version="${pkgid##*[#@]}"
+          if [ "$upstream" != "$cargo_version" ]; then
+            echo "Tag $tag does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+          version="$upstream+plus.$revision"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "archive=cosmic-term-plus-$upstream-plus.$revision-x86_64-linux" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: bash
+        run: |
+          name="${{ steps.version.outputs.archive }}"
+          dist="dist/$name"
+          install -Dm0755 target/release/cosmic-term "$dist/bin/cosmic-term"
+          install -Dm0644 target/xdgen/com.system76.CosmicTerm.desktop \
+            "$dist/share/applications/com.system76.CosmicTerm.desktop"
+          install -Dm0644 target/xdgen/com.system76.CosmicTerm.metainfo.xml \
+            "$dist/share/metainfo/com.system76.CosmicTerm.metainfo.xml"
+          for size in res/icons/hicolor/*; do
+            install -Dm0644 "$size/apps/com.system76.CosmicTerm.svg" \
+              "$dist/share/icons/hicolor/$(basename "$size")/apps/com.system76.CosmicTerm.svg"
+          done
+          install -Dm0644 LICENSE "$dist/LICENSE"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.version.outputs.archive }}.tar.gz
+            dist/${{ steps.version.outputs.archive }}.tar.gz.sha256
