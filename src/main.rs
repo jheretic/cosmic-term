@@ -2478,7 +2478,10 @@ impl Application for App {
                 }
             }
             Message::PaneSplit(axis) => {
-                if let Some(terminal) = self.build_terminal(self.get_default_profile(), false) {
+                if let Some(terminal) = self.build_terminal(
+                    self.get_default_profile(),
+                    self.config.tab_new_inherit_working_directory,
+                ) {
                     self.tabs.split(axis, terminal);
                 }
                 return self.update_title();
