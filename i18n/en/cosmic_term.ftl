@@ -110,6 +110,7 @@ new-tab = New tab
 new-window = New window
 profile = Profile
 menu-profiles = Profiles...
+close-pane = Close pane
 close-tab = Close tab
 quit = Quit
 

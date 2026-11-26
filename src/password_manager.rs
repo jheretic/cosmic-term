@@ -5,7 +5,7 @@ use cosmic::{
     widget::{self, settings::Section},
 };
 
-use crate::{Message, fl, icon_cache_get};
+use crate::{Message, fl, icon_cache_get, terminal::TerminalId};
 
 #[derive(Clone, Debug)]
 pub enum PasswordManagerMessage {
@@ -45,7 +45,7 @@ pub struct PasswordManager {
     //Which pane we should paste to, ie. which pane had focus when the
     //password manager was opened. Just to be sure it doesn't change under
     //our feet.
-    pub pane: Option<widget::pane_grid::Pane>,
+    pub terminal_id: Option<TerminalId>,
     pub expanded_entry: Option<String>,
 }
 
@@ -54,7 +54,7 @@ impl PasswordManager {
         Self {
             input_state: None,
             password_list: Default::default(),
-            pane: None,
+            terminal_id: None,
             expanded_entry: None,
         }
     }
@@ -139,15 +139,15 @@ impl PasswordManager {
     pub fn clear(&mut self) {
         self.input_state = None;
         self.password_list.clear();
-        self.pane = None;
+        self.terminal_id = None;
         self.expanded_entry = None;
     }
 
     pub fn fetch_and_paste(&self, identifier: String) -> Task<cosmic::Action<Message>> {
-        if let Some(pane) = self.pane {
+        if let Some(terminal_id) = self.terminal_id {
             cosmic::task::future(async move {
                 match store::get_password(identifier.clone()).await {
-                    Ok(password) => Message::PasswordPaste(password, pane),
+                    Ok(password) => Message::PasswordPaste(password, terminal_id),
                     Err(err) => Message::PasswordManager(PasswordManagerMessage::Error(format!(
                         "Failed to fetch password {identifier}: {err}"
                     ))),

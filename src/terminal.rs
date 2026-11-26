@@ -18,7 +18,7 @@ use alacritty_terminal::{
 };
 use cosmic::{
     iced::{advanced::graphics::text::font_system, mouse::ScrollDelta},
-    widget::{pane_grid, segmented_button},
+    widget::{self, pane_grid, segmented_button},
 };
 use cosmic_text::{
     Attrs, AttrsList, Buffer, BufferLine, CacheKeyFlags, Family, LineEnding, Shaping, Weight, Wrap,
@@ -31,7 +31,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -41,6 +41,7 @@ pub use alacritty_terminal::grid::Scroll as TerminalScroll;
 
 use crate::{
     config::{ColorSchemeKind, Config as AppConfig, ProfileId},
+    fl,
     menu::MenuState,
     mouse_reporter::MouseReporter,
 };
@@ -94,17 +95,24 @@ impl From<Size> for WindowSize {
     }
 }
 
+static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TerminalId(u64);
+
+impl TerminalId {
+    pub fn unique() -> Self {
+        Self(NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 #[derive(Clone)]
-pub struct EventProxy(
-    pane_grid::Pane,
-    segmented_button::Entity,
-    mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, Event)>,
-);
+pub struct EventProxy(TerminalId, mpsc::UnboundedSender<(TerminalId, Event)>);
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         //TODO: handle error
-        let _ = self.2.send((self.0, self.1, event));
+        let _ = self.1.send((self.0, event));
     }
 }
 
@@ -151,56 +159,223 @@ fn convert_color(colors: &Colors, color: Color) -> cosmic_text::Color {
     cosmic_text::Color::rgb(rgb.r, rgb.g, rgb.b)
 }
 
-type TabModel = segmented_button::Model<segmented_button::SingleSelect>;
+pub struct TerminalPane {
+    pub id: TerminalId,
+    pub widget_id: widget::Id,
+    pub terminal: Mutex<Terminal>,
+}
 
-pub struct TerminalPaneGrid {
-    pub panes: pane_grid::State<TabModel>,
-    pub panes_created: usize,
+impl TerminalPane {
+    pub fn new(id: TerminalId, terminal: Terminal) -> Self {
+        Self {
+            id,
+            widget_id: widget::Id::unique(),
+            terminal: Mutex::new(terminal),
+        }
+    }
+}
+
+pub struct Tab {
+    pub panes: pane_grid::State<TerminalPane>,
     focus: pane_grid::Pane,
 }
 
-impl TerminalPaneGrid {
-    pub fn new(model: TabModel) -> Self {
-        let (panes, pane) = pane_grid::State::new(model);
-        let mut terminal_ids = HashMap::new();
-        terminal_ids.insert(pane, cosmic::widget::Id::unique());
+impl Tab {
+    pub fn new(pane: TerminalPane) -> Self {
+        let (panes, focus) = pane_grid::State::new(pane);
+        Self { panes, focus }
+    }
 
-        Self {
-            panes,
-            panes_created: 1,
-            focus: pane,
-        }
-    }
-    pub fn active(&self) -> Option<&TabModel> {
-        self.panes.get(self.focus)
-    }
-    pub fn active_mut(&mut self) -> Option<&mut TabModel> {
-        self.panes.get_mut(self.focus)
-    }
-    pub fn set_focus(&mut self, pane: pane_grid::Pane) {
-        self.focus = pane;
-        self.update_terminal_focus();
-    }
     pub fn focused(&self) -> pane_grid::Pane {
         self.focus
     }
 
+    pub fn set_focus(&mut self, pane: pane_grid::Pane) {
+        if self.panes.get(pane).is_some() {
+            self.focus = pane;
+        }
+    }
+
+    pub fn focused_pane(&self) -> Option<&TerminalPane> {
+        self.panes.get(self.focus)
+    }
+
+    pub fn focused_terminal(&self) -> Option<&Mutex<Terminal>> {
+        Some(&self.focused_pane()?.terminal)
+    }
+
+    pub fn pane_of(&self, id: TerminalId) -> Option<pane_grid::Pane> {
+        self.panes
+            .iter()
+            .find(|(_, terminal_pane)| terminal_pane.id == id)
+            .map(|(pane, _)| *pane)
+    }
+
+    pub fn terminal_panes(&self) -> impl Iterator<Item = &TerminalPane> {
+        self.panes.panes.values()
+    }
+
+    pub fn terminals(&self) -> impl Iterator<Item = &Mutex<Terminal>> {
+        self.terminal_panes()
+            .map(|terminal_pane| &terminal_pane.terminal)
+    }
+
+    pub fn split(
+        &mut self,
+        axis: pane_grid::Axis,
+        terminal_pane: TerminalPane,
+    ) -> Option<pane_grid::Pane> {
+        let (pane, _split) = self.panes.split(axis, self.focus, terminal_pane)?;
+        self.focus = pane;
+        Some(pane)
+    }
+
+    pub fn close(&mut self, pane: pane_grid::Pane) -> Option<TerminalPane> {
+        let (terminal_pane, sibling) = self.panes.close(pane)?;
+        if self.focus == pane {
+            self.focus = sibling;
+        }
+        Some(terminal_pane)
+    }
+}
+
+#[derive(Default)]
+pub struct TerminalTabs {
+    pub model: segmented_button::SingleSelectModel,
+}
+
+impl TerminalTabs {
+    pub fn is_empty(&self) -> bool {
+        self.model.len() == 0
+    }
+
+    pub fn active(&self) -> Option<&Tab> {
+        self.model.active_data()
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut Tab> {
+        self.model.active_data_mut()
+    }
+
+    pub fn tabs(&self) -> impl Iterator<Item = (segmented_button::Entity, &Tab)> {
+        self.model
+            .iter()
+            .filter_map(|entity| Some((entity, self.model.data::<Tab>(entity)?)))
+    }
+
+    pub fn terminals(&self) -> impl Iterator<Item = &Mutex<Terminal>> {
+        self.tabs().flat_map(|(_, tab)| tab.terminals())
+    }
+
+    pub fn focused_pane(&self) -> Option<&TerminalPane> {
+        self.active()?.focused_pane()
+    }
+
+    pub fn focused_terminal(&self) -> Option<&Mutex<Terminal>> {
+        self.active()?.focused_terminal()
+    }
+
+    pub fn focused_terminal_id(&self) -> Option<TerminalId> {
+        Some(self.focused_pane()?.id)
+    }
+
+    pub fn terminal(&self, id: TerminalId) -> Option<&Mutex<Terminal>> {
+        self.tabs()
+            .flat_map(|(_, tab)| tab.terminal_panes())
+            .find(|terminal_pane| terminal_pane.id == id)
+            .map(|terminal_pane| &terminal_pane.terminal)
+    }
+
+    pub fn terminal_or_focused(&self, id: Option<TerminalId>) -> Option<&Mutex<Terminal>> {
+        match id {
+            Some(id) => self.terminal(id),
+            None => self.focused_terminal(),
+        }
+    }
+
+    pub fn locate(&self, id: TerminalId) -> Option<(segmented_button::Entity, pane_grid::Pane)> {
+        self.tabs()
+            .find_map(|(entity, tab)| Some((entity, tab.pane_of(id)?)))
+    }
+
+    pub fn insert(&mut self, tab: Tab) -> segmented_button::Entity {
+        let entity = self.model.insert().data(tab).closable().activate().id();
+        self.sync_title(entity);
+        self.update_terminal_focus();
+        entity
+    }
+
+    pub fn activate(&mut self, entity: segmented_button::Entity) {
+        self.model.activate(entity);
+        self.update_terminal_focus();
+    }
+
+    pub fn focus_pane(&mut self, pane: pane_grid::Pane) {
+        let entity = self.model.active();
+        if let Some(tab) = self.active_mut() {
+            tab.set_focus(pane);
+        }
+        self.sync_title(entity);
+        self.update_terminal_focus();
+    }
+
+    pub fn focus_terminal(&mut self, id: TerminalId) {
+        if let Some((entity, pane)) = self.locate(id) {
+            self.model.activate(entity);
+            self.focus_pane(pane);
+        }
+    }
+
+    pub fn split(
+        &mut self,
+        axis: pane_grid::Axis,
+        terminal_pane: TerminalPane,
+    ) -> Option<pane_grid::Pane> {
+        let entity = self.model.active();
+        let pane = self.active_mut()?.split(axis, terminal_pane)?;
+        self.sync_title(entity);
+        self.update_terminal_focus();
+        Some(pane)
+    }
+
+    pub fn close_pane(
+        &mut self,
+        entity: segmented_button::Entity,
+        pane: pane_grid::Pane,
+    ) -> Option<TerminalPane> {
+        let terminal_pane = self.model.data_mut::<Tab>(entity)?.close(pane)?;
+        self.sync_title(entity);
+        self.update_terminal_focus();
+        Some(terminal_pane)
+    }
+
+    pub fn sync_title(&mut self, entity: segmented_button::Entity) {
+        let title = self
+            .model
+            .data::<Tab>(entity)
+            .and_then(Tab::focused_terminal)
+            .map(|terminal| terminal.lock().unwrap().title.clone());
+        if let Some(title) = title {
+            self.model.text_set(entity, title);
+        }
+    }
+
     pub fn update_terminal_focus(&self) {
-        for (pane, tab_model) in self.panes.panes.iter() {
-            let entity = tab_model.active();
-            if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
-                let mut terminal = terminal.lock().unwrap();
-                terminal.set_focused(self.focus == *pane);
-                terminal.update();
+        let active = self.model.active();
+        for (entity, tab) in self.tabs() {
+            for (pane, terminal_pane) in tab.panes.iter() {
+                let mut terminal = terminal_pane.terminal.lock().unwrap();
+                if terminal.set_focused(entity == active && *pane == tab.focus) {
+                    terminal.update();
+                }
             }
         }
     }
+
     pub fn unfocus_all_terminals(&self) {
-        for tab_model in self.panes.panes.values() {
-            let entity = tab_model.active();
-            if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
-                let mut terminal = terminal.lock().unwrap();
-                terminal.set_focused(false);
+        for terminal in self.terminals() {
+            let mut terminal = terminal.lock().unwrap();
+            if terminal.set_focused(false) {
                 terminal.update();
             }
         }
@@ -242,6 +417,7 @@ pub struct Terminal {
     pub needs_update: bool,
     pub profile_id_opt: Option<ProfileId>,
     pub tab_title_override: Option<String>,
+    pub title: String,
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub url_regex_search: RegexSearch,
     pub regex_matches: Vec<alacritty_terminal::term::search::Match>,
@@ -267,9 +443,8 @@ impl Terminal {
     //TODO: error handling
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pane: pane_grid::Pane,
-        entity: segmented_button::Entity,
-        event_tx: mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, Event)>,
+        id: TerminalId,
+        event_tx: mpsc::UnboundedSender<(TerminalId, Event)>,
         config: Config,
         options: Options,
         app_config: &AppConfig,
@@ -321,7 +496,7 @@ impl Terminal {
             cell_width,
             cell_height,
         };
-        let event_proxy = EventProxy(pane, entity, event_tx);
+        let event_proxy = EventProxy(id, event_tx);
         let term = Arc::new(FairMutex::new(Term::new(
             config,
             &size,
@@ -360,6 +535,9 @@ impl Terminal {
             search_value: String::new(),
             shell_pid,
             size,
+            title: tab_title_override
+                .clone()
+                .unwrap_or_else(|| fl!("new-terminal")),
             tab_title_override,
             term,
             use_bright_bold,
@@ -415,7 +593,7 @@ impl Terminal {
         self.zoom_adj = value;
     }
 
-    fn set_focused(&mut self, is_focused: bool) {
+    fn set_focused(&mut self, is_focused: bool) -> bool {
         let focus_changed = self.is_focused != is_focused;
         self.is_focused = is_focused;
 
@@ -429,6 +607,7 @@ impl Terminal {
                 self.input_no_scroll(input);
             }
         }
+        focus_changed
     }
 
     pub fn redraw(&self) -> bool {
@@ -1275,5 +1454,31 @@ impl Drop for Terminal {
         if let Err(err) = self.notifier.0.send(Msg::Shutdown) {
             log::warn!("Failed to send shutdown message on dropped terminal: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalId;
+    use std::collections::HashSet;
+
+    #[test]
+    fn terminal_ids_are_unique() {
+        let ids: HashSet<_> = (0..1000).map(|_| TerminalId::unique()).collect();
+        assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn terminal_ids_are_unique_across_threads() {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| (0..250).map(|_| TerminalId::unique()).collect::<Vec<_>>())
+            })
+            .collect();
+        let ids: HashSet<_> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 1000);
     }
 }

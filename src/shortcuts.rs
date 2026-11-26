@@ -65,6 +65,7 @@ pub enum KeyBindAction {
     PaneFocusLeft,
     PaneFocusRight,
     PaneFocusUp,
+    PaneClose,
     PaneSplitHorizontal,
     PaneSplitVertical,
     PaneToggleMaximized,
@@ -109,6 +110,7 @@ impl KeyBindAction {
             Self::PaneFocusLeft => Some(Action::PaneFocusLeft),
             Self::PaneFocusRight => Some(Action::PaneFocusRight),
             Self::PaneFocusUp => Some(Action::PaneFocusUp),
+            Self::PaneClose => Some(Action::PaneClose),
             Self::PaneSplitHorizontal => Some(Action::PaneSplitHorizontal),
             Self::PaneSplitVertical => Some(Action::PaneSplitVertical),
             Self::PaneToggleMaximized => Some(Action::PaneToggleMaximized),
@@ -271,6 +273,7 @@ pub fn action_label(action: KeyBindAction) -> String {
         KeyBindAction::PaneFocusLeft => fl!("focus-pane-left"),
         KeyBindAction::PaneFocusRight => fl!("focus-pane-right"),
         KeyBindAction::PaneFocusUp => fl!("focus-pane-up"),
+        KeyBindAction::PaneClose => fl!("close-pane"),
         KeyBindAction::PaneSplitHorizontal => fl!("split-horizontal"),
         KeyBindAction::PaneSplitVertical => fl!("split-vertical"),
         KeyBindAction::PaneToggleMaximized => fl!("pane-toggle-maximize"),
@@ -347,6 +350,7 @@ pub fn shortcut_groups() -> Vec<ShortcutGroup> {
             KeyBindAction::PaneSplitHorizontal,
             KeyBindAction::PaneSplitVertical,
             KeyBindAction::PaneToggleMaximized,
+            KeyBindAction::PaneClose,
             KeyBindAction::PaneFocusLeft,
             KeyBindAction::PaneFocusRight,
             KeyBindAction::PaneFocusUp,
@@ -461,7 +465,7 @@ fn fallback_shortcuts() -> Shortcuts {
     bind!([Ctrl, Shift], "T", TabNew);
     bind!([Ctrl, Shift], "V", Paste);
     bind!([Shift], "Insert", PastePrimary);
-    bind!([Ctrl, Shift], "W", TabClose);
+    bind!([Ctrl, Shift], "W", PaneClose);
     bind!([Ctrl], ",", Settings);
     bind!([], "F11", ToggleFullscreen);
 

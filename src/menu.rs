@@ -11,12 +11,12 @@ use cosmic::{
     widget::{
         self,
         menu::{ItemHeight, ItemWidth},
-        responsive_menu_bar, segmented_button,
+        responsive_menu_bar,
     },
 };
 use std::{collections::HashMap, sync::LazyLock};
 
-use crate::{Action, ColorSchemeId, ColorSchemeKind, Config, Message, fl};
+use crate::{Action, ColorSchemeId, ColorSchemeKind, Config, Message, fl, terminal::TerminalId};
 
 static MENU_ID: LazyLock<cosmic::widget::Id> =
     LazyLock::new(|| cosmic::widget::Id::new("responsive-menu"));
@@ -27,26 +27,27 @@ pub struct MenuState {
     pub link: Option<String>,
 }
 
-/// A context menu action dispatched to the tab the menu was opened on.
+/// A context menu action dispatched to the terminal the menu was opened on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TabAction(pub segmented_button::Entity, pub Action);
+pub struct TerminalAction(pub TerminalId, pub Action);
 
-impl MenuAction for TabAction {
+impl MenuAction for TerminalAction {
     type Message = Message;
 
     fn message(&self) -> Message {
-        Message::TabContextAction(self.0, self.1)
+        Message::TerminalContextAction(self.0, self.1)
     }
 }
 
 pub fn context_menu(
     config: &Config,
     key_binds: &HashMap<KeyBind, Action>,
-    entity: segmented_button::Entity,
+    terminal_id: TerminalId,
     link: Option<String>,
 ) -> Vec<widget::menu::Tree<Message>> {
-    let item =
-        |label: String, action: Action| MenuItem::Button(label, None, TabAction(entity, action));
+    let item = |label: String, action: Action| {
+        MenuItem::Button(label, None, TerminalAction(terminal_id, action))
+    };
 
     let mut items = vec![
         item(fl!("new-tab"), Action::TabNew),
@@ -65,7 +66,7 @@ pub fn context_menu(
             fl!("window-header"),
             None,
             config.show_headerbar,
-            TabAction(entity, Action::ShowHeaderBar(!config.show_headerbar)),
+            TerminalAction(terminal_id, Action::ShowHeaderBar(!config.show_headerbar)),
         ),
         MenuItem::Divider,
     ];
@@ -79,9 +80,9 @@ pub fn context_menu(
         items.insert(2, MenuItem::Divider);
     }
 
-    let key_binds: HashMap<KeyBind, TabAction> = key_binds
+    let key_binds: HashMap<KeyBind, TerminalAction> = key_binds
         .iter()
-        .map(|(key_bind, action)| (key_bind.clone(), TabAction(entity, *action)))
+        .map(|(key_bind, action)| (key_bind.clone(), TerminalAction(terminal_id, *action)))
         .collect();
     widget::menu::items(&key_binds, items)
 }
@@ -168,6 +169,7 @@ pub fn menu_bar<'a>(
                         MenuItem::Folder(fl!("profile"), profile_items),
                         MenuItem::Button(fl!("menu-profiles"), None, Action::Profiles),
                         MenuItem::Divider,
+                        MenuItem::Button(fl!("close-pane"), None, Action::PaneClose),
                         MenuItem::Button(fl!("close-tab"), None, Action::TabClose),
                         MenuItem::Divider,
                         MenuItem::Button(fl!("quit"), None, Action::WindowClose),
