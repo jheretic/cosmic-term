@@ -95,6 +95,14 @@ pub fn icon_cache_get(name: &'static str, size: u16) -> widget::icon::Icon {
 /// Runs application with these settings
 #[rustfmt::skip]
 fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let raw_args = RawArgs::from_args();
     let mut cursor = raw_args.cursor();
 
@@ -260,6 +268,7 @@ Options:
   --help                          Show this message
   --version                       Show the version of cosmic-term
   --dropdown                      Toggle the quake-style dropdown terminal
+  --no-daemon                     Stay in the foreground instead of forking
   -w, --working-directory <dir>   Set the working directory for the terminal"#
     );
 }

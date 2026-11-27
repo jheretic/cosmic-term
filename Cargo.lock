@@ -1497,6 +1497,7 @@ dependencies = [
  "shlex",
  "thiserror 2.0.21",
  "tokio",
+ "tracing-subscriber",
  "url",
  "xdgen",
  "zbus 6.5.0",
