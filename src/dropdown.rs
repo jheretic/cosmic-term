@@ -23,6 +23,7 @@ pub const DBUS_PATH: &str = "/com/system76/CosmicTerm/Dropdown";
 pub const DBUS_INTERFACE: &str = "com.system76.CosmicTerm.Dropdown";
 const NAMESPACE: &str = "cosmic-term-dropdown";
 pub const FOCUS_LOSS_GRACE: Duration = Duration::from_millis(150);
+pub const REFOCUS_TIMEOUT: Duration = Duration::from_millis(250);
 
 static BUILD_ID: LazyLock<String> = LazyLock::new(|| {
     std::env::current_exe()
@@ -161,9 +162,36 @@ pub struct Dropdown {
     output_choices: Vec<Option<String>>,
     output_names: Vec<String>,
     focus_generation: u64,
+    refocusing: bool,
 }
 
 impl Dropdown {
+    pub fn begin_refocus<M: Send + 'static>(&mut self, config: &DropdownConfig) -> Option<Task<M>> {
+        match self.state {
+            State::Shown { id, .. } if config.focus == DropdownFocus::OnDemand => {
+                self.refocusing = true;
+                Some(layer_surface::set_keyboard_interactivity(
+                    id,
+                    KeyboardInteractivity::Exclusive,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn end_refocus<M: Send + 'static>(&mut self, config: &DropdownConfig) -> Option<Task<M>> {
+        if !std::mem::take(&mut self.refocusing) {
+            return None;
+        }
+        match self.state {
+            State::Shown { id, .. } => Some(layer_surface::set_keyboard_interactivity(
+                id,
+                keyboard_interactivity(config.focus),
+            )),
+            _ => None,
+        }
+    }
+
     pub fn focus_lost(&mut self, id: window::Id, config: &DropdownConfig) -> Option<u64> {
         match self.state {
             State::Shown { id: shown, .. } if shown == id && config.hide_on_focus_loss => {
@@ -242,6 +270,7 @@ impl Dropdown {
     pub fn hide(&mut self) -> Option<window::Id> {
         let id = self.surface_id();
         self.state = State::Hidden;
+        self.refocusing = false;
         self.focus_gained();
         id
     }
@@ -522,6 +551,39 @@ mod tests {
         let generation = dropdown.focus_lost(id, &config).unwrap();
         dropdown.hide();
         assert!(!dropdown.focus_timed_out(generation));
+    }
+
+    #[test]
+    fn refocus_only_applies_to_on_demand_focus() {
+        let config = DropdownConfig::default();
+        let (mut dropdown, _) = shown(&config);
+        assert!(dropdown.begin_refocus::<()>(&config).is_none());
+        assert!(dropdown.end_refocus::<()>(&config).is_none());
+    }
+
+    #[test]
+    fn refocus_restores_focus_mode_once() {
+        let config = DropdownConfig {
+            focus: DropdownFocus::OnDemand,
+            ..Default::default()
+        };
+        let (mut dropdown, _) = shown(&config);
+        assert!(dropdown.begin_refocus::<()>(&config).is_some());
+        assert!(dropdown.end_refocus::<()>(&config).is_some());
+        assert!(dropdown.end_refocus::<()>(&config).is_none());
+    }
+
+    #[test]
+    fn hiding_cancels_refocus() {
+        let config = DropdownConfig {
+            focus: DropdownFocus::OnDemand,
+            ..Default::default()
+        };
+        let (mut dropdown, _) = shown(&config);
+        assert!(dropdown.begin_refocus::<()>(&config).is_some());
+        dropdown.hide();
+        assert!(dropdown.end_refocus::<()>(&config).is_none());
+        assert!(dropdown.begin_refocus::<()>(&config).is_none());
     }
 
     #[test]

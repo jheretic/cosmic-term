@@ -475,6 +475,8 @@ pub enum Message {
     #[cfg(feature = "wayland")]
     DropdownFocusGained,
     #[cfg(feature = "wayland")]
+    DropdownRefocusTimeout,
+    #[cfg(feature = "wayland")]
     DropdownFocusTimeout(u64),
     #[cfg(feature = "wayland")]
     DropdownOutput(
@@ -679,6 +681,13 @@ impl App {
             }
             dropdown::OutputChange::ShowPending | dropdown::OutputChange::None => Task::none(),
         }
+    }
+
+    #[cfg(feature = "wayland")]
+    fn dropdown_end_refocus(&mut self) -> Task<Message> {
+        self.dropdown_state
+            .end_refocus(&self.config.dropdown)
+            .unwrap_or_else(Task::none)
     }
 
     #[cfg(feature = "wayland")]
@@ -3326,8 +3335,22 @@ impl Application for App {
                 self.reset_active_pane_zoom();
                 return self.update_config();
             }
-            Message::Surface(a) => {
-                return cosmic::task::message(cosmic::Action::Surface(a));
+            Message::Surface(action) => {
+                #[cfg(feature = "wayland")]
+                if matches!(action, surface::Action::DestroyPopup(_))
+                    && let Some(hold_focus) =
+                        self.dropdown_state.begin_refocus(&self.config.dropdown)
+                {
+                    return Task::batch([
+                        hold_focus,
+                        cosmic::task::message(cosmic::Action::Surface(action)),
+                        cosmic::task::future(async {
+                            tokio::time::sleep(dropdown::REFOCUS_TIMEOUT).await;
+                            Message::DropdownRefocusTimeout
+                        }),
+                    ]);
+                }
+                return cosmic::task::message(cosmic::Action::Surface(action));
             }
             Message::ReorderTab(ReorderEvent {
                 dragged,
@@ -3364,6 +3387,11 @@ impl Application for App {
             #[cfg(feature = "wayland")]
             Message::DropdownFocusGained => {
                 self.dropdown_state.focus_gained();
+                return self.dropdown_end_refocus();
+            }
+            #[cfg(feature = "wayland")]
+            Message::DropdownRefocusTimeout => {
+                return self.dropdown_end_refocus();
             }
             #[cfg(feature = "wayland")]
             Message::DropdownFocusTimeout(generation) => {
